@@ -290,6 +290,10 @@ export const settingsApi = {
   async setLogConfig(config: LogConfig): Promise<boolean> {
     return await invoke("set_log_config", { config });
   },
+
+  async readAppLogTail(maxBytes?: number): Promise<AppLogTail> {
+    return await invoke("read_app_log_tail", { maxBytes });
+  },
 };
 
 export interface CodexRtkInstallResult {
@@ -346,6 +350,13 @@ export interface OptimizerConfig {
 export interface LogConfig {
   enabled: boolean;
   level: "error" | "warn" | "info" | "debug" | "trace";
+}
+
+export interface AppLogTail {
+  logPath: string;
+  content: string;
+  truncated: boolean;
+  bytesRead: number;
 }
 
 export interface BackupEntry {

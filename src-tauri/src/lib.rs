@@ -1164,6 +1164,7 @@ pub fn run() {
             commands::set_copilot_optimizer_config,
             commands::get_log_config,
             commands::set_log_config,
+            commands::read_app_log_tail,
             commands::restart_app,
             commands::install_update_and_restart,
             commands::check_for_updates,

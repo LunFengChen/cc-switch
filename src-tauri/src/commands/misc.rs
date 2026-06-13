@@ -50,6 +50,71 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
     .map_err(|e| format!("剪贴板任务执行失败: {e}"))?
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLogTail {
+    log_path: String,
+    content: String,
+    truncated: bool,
+    bytes_read: usize,
+}
+
+/// 读取当前应用日志尾部，供设置页里的日志控制台展示。
+#[tauri::command]
+pub async fn read_app_log_tail(max_bytes: Option<usize>) -> Result<AppLogTail, String> {
+    tokio::task::spawn_blocking(move || {
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+
+        const DEFAULT_MAX_BYTES: usize = 256 * 1024;
+        const HARD_MAX_BYTES: usize = 1024 * 1024;
+
+        let max_bytes = max_bytes
+            .unwrap_or(DEFAULT_MAX_BYTES)
+            .clamp(4 * 1024, HARD_MAX_BYTES);
+        let log_path = crate::config::get_app_config_dir()
+            .join("logs")
+            .join("cc-switch.log");
+
+        if !log_path.exists() {
+            return Ok(AppLogTail {
+                log_path: log_path.to_string_lossy().to_string(),
+                content: String::new(),
+                truncated: false,
+                bytes_read: 0,
+            });
+        }
+
+        let mut file = File::open(&log_path)
+            .map_err(|e| format!("打开日志文件 {} 失败: {e}", log_path.display()))?;
+        let len = file
+            .metadata()
+            .map_err(|e| format!("读取日志文件元数据失败: {e}"))?
+            .len();
+        let read_len = (len as usize).min(max_bytes);
+        let truncated = len as usize > read_len;
+
+        if truncated {
+            file.seek(SeekFrom::End(-(read_len as i64)))
+                .map_err(|e| format!("定位日志尾部失败: {e}"))?;
+        }
+
+        let mut buf = Vec::with_capacity(read_len);
+        file.read_to_end(&mut buf)
+            .map_err(|e| format!("读取日志文件失败: {e}"))?;
+        let content = String::from_utf8_lossy(&buf).into_owned();
+
+        Ok(AppLogTail {
+            log_path: log_path.to_string_lossy().to_string(),
+            content,
+            truncated,
+            bytes_read: read_len,
+        })
+    })
+    .await
+    .map_err(|e| format!("日志读取任务执行失败: {e}"))?
+}
+
 /// 检查更新
 #[tauri::command]
 pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
