@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import type { Provider } from "@/types";
+import type { ProviderStats } from "@/types/usage";
 import type { AppId } from "@/lib/api";
 import { providersApi } from "@/lib/api/providers";
 import { useDragSort } from "@/hooks/useDragSort";
@@ -47,6 +48,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi } from "@/lib/api/settings";
+import { useProviderStats } from "@/lib/query/usage";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -96,6 +98,15 @@ export function ProviderList({
   const { sortedProviders, sensors, handleDragEnd } = useDragSort(
     providers,
     appId,
+  );
+  const { data: providerStats = [] } = useProviderStats(
+    { preset: "today" },
+    appId,
+    { refetchInterval: 30000 },
+  );
+  const providerStatsById = useMemo(
+    () => new Map(providerStats.map((stats) => [stats.providerId, stats])),
+    [providerStats],
   );
 
   const { data: opencodeLiveIds } = useQuery({
@@ -275,6 +286,59 @@ export function ProviderList({
     },
   });
 
+  const handleSetFailoverPrimary = useCallback(
+    async (providerId: string) => {
+      const currentIndex = sortedProviders.findIndex(
+        (provider) => provider.id === providerId,
+      );
+      if (currentIndex <= 0) return;
+
+      const target = sortedProviders[currentIndex];
+      const reordered = [
+        target,
+        ...sortedProviders.filter((provider) => provider.id !== providerId),
+      ];
+      const updates = reordered.map((provider, index) => ({
+        id: provider.id,
+        sortIndex: index,
+      }));
+
+      try {
+        await providersApi.updateSortOrder(updates, appId);
+        await queryClient.invalidateQueries({ queryKey: ["providers", appId] });
+        await queryClient.invalidateQueries({
+          queryKey: ["failoverQueue", appId],
+        });
+        await queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+
+        try {
+          await providersApi.updateTrayMenu();
+        } catch (trayError) {
+          console.error(
+            "Failed to update tray menu after failover primary change",
+            trayError,
+          );
+        }
+
+        toast.success(
+          t("failover.primaryUpdated", {
+            defaultValue: "已设为故障转移 P1",
+          }),
+          { closeButton: true },
+        );
+      } catch (error) {
+        console.error("Failed to set failover primary", error);
+        toast.error(
+          t("failover.primaryUpdateFailed", {
+            defaultValue: "设置 P1 失败",
+          }),
+          { description: String(error) },
+        );
+      }
+    },
+    [appId, queryClient, sortedProviders, t],
+  );
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -450,7 +514,11 @@ export function ProviderList({
                 onToggleFailover={(enabled) =>
                   handleToggleFailover(provider.id, enabled)
                 }
+                onSetFailoverPrimary={() =>
+                  void handleSetFailoverPrimary(provider.id)
+                }
                 activeProviderId={activeProviderId}
+                usageStats={providerStatsById.get(provider.id)}
                 // OpenClaw: default model / Hermes: model.provider === provider.id
                 isDefaultModel={
                   appId === "hermes"
@@ -600,7 +668,9 @@ interface SortableProviderCardProps {
   failoverPriority?: number;
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
+  onSetFailoverPrimary: () => void;
   activeProviderId?: string;
+  usageStats?: ProviderStats;
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -631,7 +701,9 @@ function SortableProviderCard({
   failoverPriority,
   isInFailoverQueue,
   onToggleFailover,
+  onSetFailoverPrimary,
   activeProviderId,
+  usageStats,
   isDefaultModel,
   onSetAsDefault,
 }: SortableProviderCardProps) {
@@ -683,7 +755,9 @@ function SortableProviderCard({
         failoverPriority={failoverPriority}
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
+        onSetFailoverPrimary={onSetFailoverPrimary}
         activeProviderId={activeProviderId}
+        usageStats={usageStats}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
         onSetAsDefault={onSetAsDefault}
