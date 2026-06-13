@@ -5,8 +5,8 @@
 use super::hyper_client::ProxyResponse;
 use super::{
     body_filter::filter_private_params_with_whitelist,
-    error::*,
     failover_switch::FailoverSwitchManager,
+    failure_classifier::classify_provider_failure,
     json_canonical::{canonicalize_value, short_value_hash},
     log_codes::fwd as log_fwd,
     provider_router::ProviderRouter,
@@ -28,11 +28,15 @@ use crate::{app_config::AppType, provider::Provider};
 use futures::StreamExt;
 use http::Extensions;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+static FORWARD_TRACE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct ForwardResult {
     pub response: ProxyResponse,
@@ -383,6 +387,26 @@ impl RequestForwarder {
             });
         }
 
+        let trace_id = next_forward_trace_id(app_type_str);
+        let request_hash = short_value_hash(Some(&body));
+        let request_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>");
+        let (endpoint_path, _) = split_endpoint_and_query(endpoint);
+        log::info!(
+            "[{app_type_str}] [{}] trace_id={} method={} endpoint={} model={} providers={} max_attempts={} session={} body_hash={}",
+            log_fwd::POOL_START,
+            trace_id,
+            method,
+            endpoint_path,
+            summarize_text_for_log(request_model, 96),
+            providers.len(),
+            self.max_attempts,
+            summarize_text_for_log(&self.session_id, 80),
+            request_hash
+        );
+
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
@@ -422,6 +446,13 @@ impl RequestForwarder {
             };
 
             if !allowed {
+                log::warn!(
+                    "[{app_type_str}] [{}] trace_id={} provider={} ({}) skipped: circuit breaker not allowing request",
+                    log_fwd::PROVIDER_SKIPPED,
+                    trace_id,
+                    provider.name,
+                    provider.id
+                );
                 continue;
             }
 
@@ -442,6 +473,23 @@ impl RequestForwarder {
                 };
 
             attempted_providers += 1;
+            log::info!(
+                "[{app_type_str}] [{}] trace_id={} attempt={}/{} provider={} ({}) model={} body_hash={}",
+                log_fwd::ATTEMPT_START,
+                trace_id,
+                attempted_providers,
+                providers.len().min(self.max_attempts),
+                provider.name,
+                provider.id,
+                summarize_text_for_log(
+                    provider_body
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or(request_model),
+                    96,
+                ),
+                short_value_hash(Some(&provider_body))
+            );
 
             // 更新状态中的当前 Provider 信息（per-attempt 维度的标识）
             //
@@ -469,6 +517,7 @@ impl RequestForwarder {
                 .await
             {
                 Ok((response, claude_api_format, outbound_model)) => {
+                    let status_code = response.status().as_u16();
                     // 成功：普通闭合熔断状态异步记录，避免阻塞流式首包返回；
                     // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
                     self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
@@ -490,6 +539,16 @@ impl RequestForwarder {
                         status.last_error = None;
                         let should_switch =
                             self.current_provider_id_at_start.as_str() != provider.id.as_str();
+                        log::info!(
+                            "[{app_type_str}] [{}] trace_id={} provider={} ({}) success status={} failover_switch={} outbound_model={}",
+                            log_fwd::ATTEMPT_SUCCESS,
+                            trace_id,
+                            provider.name,
+                            provider.id,
+                            status_code,
+                            should_switch,
+                            outbound_model.as_deref().unwrap_or("<unknown>")
+                        );
                         if should_switch {
                             status.failover_count += 1;
 
@@ -978,14 +1037,25 @@ impl RequestForwarder {
                         });
                     }
 
-                    // 先分类错误，决定是否计入 provider 健康度
-                    // —— NonRetryable / ClientAbort 是客户端层错误，无论换哪家 provider 都会被拒绝，
-                    //    不应污染熔断器和数据库健康度（与 release_permit_neutral 同语义）。
-                    let category = self.categorize_proxy_error(&e);
+                    // 通用 Provider Pool 错误分类：
+                    // - retryable=true：当前请求可以尝试下一个 provider
+                    // - affects_provider_health=true：计入熔断器/健康状态
+                    // - 详细字段写入日志，方便后续按 trace_id 回溯渠道切换链路
+                    let classification = classify_provider_failure(&e);
+                    log::warn!(
+                        "[{app_type_str}] [{}] trace_id={} provider={} ({}) classified failure: {}, reason={}, error={}",
+                        log_fwd::FAILURE_CLASSIFIED,
+                        trace_id,
+                        provider.name,
+                        provider.id,
+                        classification.log_fields(),
+                        classification.reason,
+                        summarize_proxy_error(&e)
+                    );
 
-                    match category {
-                        ErrorCategory::Retryable => {
-                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
+                    if classification.retryable {
+                        if classification.affects_provider_health {
+                            // 可重试的 provider 故障 → 记录失败并更新熔断器/DB 健康度
                             let _ = self
                                 .router
                                 .record_result(
@@ -996,28 +1066,7 @@ impl RequestForwarder {
                                     Some(e.to_string()),
                                 )
                                 .await;
-
-                            {
-                                let mut status = self.status.write().await;
-                                status.last_error =
-                                    Some(format!("Provider {} 失败: {}", provider.name, e));
-                            }
-
-                            let (log_code, log_message) = build_retryable_failure_log(
-                                &provider.name,
-                                attempted_providers,
-                                providers.len(),
-                                &e,
-                            );
-                            log::warn!("[{app_type_str}] [{log_code}] {log_message}");
-
-                            last_error = Some(e);
-                            last_provider = Some(provider.clone());
-                            // 继续尝试下一个供应商
-                            continue;
-                        }
-                        ErrorCategory::NonRetryable | ErrorCategory::ClientAbort => {
-                            // 不可重试：客户端层错误或客户端断连 → 不污染健康度，仅释放 HalfOpen permit
+                        } else {
                             self.router
                                 .release_permit_neutral(
                                     &provider.id,
@@ -1025,22 +1074,64 @@ impl RequestForwarder {
                                     used_half_open_permit,
                                 )
                                 .await;
-                            {
-                                let mut status = self.status.write().await;
-                                status.failed_requests += 1;
-                                status.last_error = Some(e.to_string());
-                                if status.total_requests > 0 {
-                                    status.success_rate = (status.success_requests as f32
-                                        / status.total_requests as f32)
-                                        * 100.0;
-                                }
-                            }
-                            return Err(ForwardError {
-                                error: e,
-                                provider: Some(provider.clone()),
-                            });
+                        }
+
+                        {
+                            let mut status = self.status.write().await;
+                            status.last_error = Some(format!(
+                                "Provider {} 失败: {} ({})",
+                                provider.name,
+                                e,
+                                classification.kind.as_str()
+                            ));
+                        }
+
+                        let (log_code, log_message) = build_retryable_failure_log(
+                            &provider.name,
+                            attempted_providers,
+                            providers.len(),
+                            &e,
+                            &classification,
+                        );
+                        log::warn!(
+                            "[{app_type_str}] [{log_code}] trace_id={} {log_message}",
+                            trace_id
+                        );
+
+                        last_error = Some(e);
+                        last_provider = Some(provider.clone());
+                        // 继续尝试下一个供应商
+                        continue;
+                    }
+
+                    // 不可重试：客户端层错误或代理内部错误 → 不污染健康度，仅释放 HalfOpen permit
+                    self.router
+                        .release_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
+                        .await;
+                    log::warn!(
+                        "[{app_type_str}] [{}] trace_id={} stop failover at provider={} ({}): {}, reason={}",
+                        log_fwd::NON_RETRYABLE_STOP,
+                        trace_id,
+                        provider.name,
+                        provider.id,
+                        classification.log_fields(),
+                        classification.reason
+                    );
+                    {
+                        let mut status = self.status.write().await;
+                        status.failed_requests += 1;
+                        status.last_error =
+                            Some(format!("{} ({})", e, classification.kind.as_str()));
+                        if status.total_requests > 0 {
+                            status.success_rate = (status.success_requests as f32
+                                / status.total_requests as f32)
+                                * 100.0;
                         }
                     }
+                    return Err(ForwardError {
+                        error: e,
+                        provider: Some(provider.clone()),
+                    });
                 }
             }
         }
@@ -2122,40 +2213,6 @@ impl RequestForwarder {
             }
         }
     }
-
-    fn categorize_proxy_error(&self, error: &ProxyError) -> ErrorCategory {
-        match error {
-            // 网络和上游错误：都应该尝试下一个供应商
-            ProxyError::Timeout(_) => ErrorCategory::Retryable,
-            ProxyError::ForwardFailed(_) => ErrorCategory::Retryable,
-            ProxyError::ProviderUnhealthy(_) => ErrorCategory::Retryable,
-            // 上游 HTTP 错误：按状态码分桶。
-            //
-            // 客户端请求自身有问题的状态码无论换哪个 provider 都会被拒绝，
-            // 继续轮询只会放大错误率、污染熔断器健康度、浪费配额：
-            //   400 Bad Request / 422 Unprocessable Entity   ← 请求体格式或语义错误
-            //   405 Method Not Allowed / 406 Not Acceptable  ← 方法或 Accept 错误
-            //   413 Payload Too Large / 414 URI Too Long     ← 客户端构造超限
-            //   415 Unsupported Media Type                    ← Content-Type 错误
-            //   501 Not Implemented                           ← 上游协议确实不支持
-            //
-            // 其他 4xx（401/403/404/408/409/429/451 等）和全部 5xx 都保留
-            // Retryable —— 换一家 provider 可能持有不同的 key、配额、地域或模型映射。
-            ProxyError::UpstreamError { status, .. } => match *status {
-                400 | 405 | 406 | 413 | 414 | 415 | 422 | 501 => ErrorCategory::NonRetryable,
-                _ => ErrorCategory::Retryable,
-            },
-            // Provider 级配置/转换问题：换一个 Provider 可能就能成功
-            ProxyError::ConfigError(_) => ErrorCategory::Retryable,
-            ProxyError::TransformError(_) => ErrorCategory::Retryable,
-            ProxyError::AuthError(_) => ErrorCategory::Retryable,
-            ProxyError::StreamIdleTimeout(_) => ErrorCategory::Retryable,
-            // 无可用供应商：所有供应商都试过了，无法重试
-            ProxyError::NoAvailableProvider => ErrorCategory::NonRetryable,
-            // 其他错误（数据库/内部错误等）：不是换供应商能解决的问题
-            _ => ErrorCategory::NonRetryable,
-        }
-    }
 }
 
 /// 从 ProxyError 中提取错误消息
@@ -2164,6 +2221,11 @@ fn extract_error_message(error: &ProxyError) -> Option<String> {
         ProxyError::UpstreamError { body, .. } => body.clone(),
         _ => Some(error.to_string()),
     }
+}
+
+fn next_forward_trace_id(app_type: &str) -> String {
+    let seq = FORWARD_TRACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{app_type}-{seq}")
 }
 
 /// 检测 Provider 是否为 Bedrock（通过 CLAUDE_CODE_USE_BEDROCK 环境变量判断）
@@ -2182,19 +2244,21 @@ fn build_retryable_failure_log(
     attempted_providers: usize,
     total_providers: usize,
     error: &ProxyError,
+    classification: &super::failure_classifier::ProviderFailureClassification,
 ) -> (&'static str, String) {
     let error_summary = summarize_proxy_error(error);
+    let classification_summary = classification.log_fields();
 
     if total_providers <= 1 {
         (
             log_fwd::SINGLE_PROVIDER_FAILED,
-            format!("Provider {provider_name} 请求失败: {error_summary}"),
+            format!("Provider {provider_name} 请求失败: {error_summary}; {classification_summary}"),
         )
     } else {
         (
             log_fwd::PROVIDER_FAILED_RETRY,
             format!(
-                "Provider {provider_name} 失败，继续尝试下一个 ({attempted_providers}/{total_providers}): {error_summary}"
+                "Provider {provider_name} 失败，继续尝试下一个 ({attempted_providers}/{total_providers}): {error_summary}; {classification_summary}"
             ),
         )
     }
@@ -2668,12 +2732,15 @@ mod tests {
             body: Some(r#"{"error":{"message":"rate limit exceeded"}}"#.to_string()),
         };
 
-        let (code, message) = build_retryable_failure_log("PackyCode-response", 1, 1, &error);
+        let classification = classify_provider_failure(&error);
+        let (code, message) =
+            build_retryable_failure_log("PackyCode-response", 1, 1, &error, &classification);
 
         assert_eq!(code, log_fwd::SINGLE_PROVIDER_FAILED);
         assert!(message.contains("Provider PackyCode-response 请求失败"));
         assert!(message.contains("上游 HTTP 429"));
         assert!(message.contains("rate limit exceeded"));
+        assert!(message.contains("kind=rate_limited"));
         assert!(!message.contains("切换下一个"));
     }
 
@@ -2681,11 +2748,13 @@ mod tests {
     fn multi_provider_retryable_log_keeps_failover_wording() {
         let error = ProxyError::Timeout("upstream timed out after 30s".to_string());
 
-        let (code, message) = build_retryable_failure_log("primary", 1, 3, &error);
+        let classification = classify_provider_failure(&error);
+        let (code, message) = build_retryable_failure_log("primary", 1, 3, &error, &classification);
 
         assert_eq!(code, log_fwd::PROVIDER_FAILED_RETRY);
         assert!(message.contains("继续尝试下一个 (1/3)"));
         assert!(message.contains("请求超时"));
+        assert!(message.contains("kind=timeout"));
     }
 
     #[test]

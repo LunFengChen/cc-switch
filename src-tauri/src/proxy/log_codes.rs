@@ -35,6 +35,12 @@ pub mod fwd {
     pub const PROVIDER_FAILED_RETRY: &str = "FWD-001";
     pub const ALL_PROVIDERS_FAILED: &str = "FWD-002";
     pub const SINGLE_PROVIDER_FAILED: &str = "FWD-003";
+    pub const POOL_START: &str = "FWD-004";
+    pub const ATTEMPT_START: &str = "FWD-005";
+    pub const ATTEMPT_SUCCESS: &str = "FWD-006";
+    pub const PROVIDER_SKIPPED: &str = "FWD-007";
+    pub const FAILURE_CLASSIFIED: &str = "FWD-008";
+    pub const NON_RETRYABLE_STOP: &str = "FWD-009";
 }
 
 /// 故障转移日志码

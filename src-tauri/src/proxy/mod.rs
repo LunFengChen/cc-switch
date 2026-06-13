@@ -9,6 +9,7 @@ pub mod copilot_optimizer;
 pub mod error;
 pub mod error_mapper;
 pub(crate) mod failover_switch;
+pub mod failure_classifier;
 mod forwarder;
 pub mod gemini_url;
 pub mod handler_config;
