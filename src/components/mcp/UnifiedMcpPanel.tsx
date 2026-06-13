@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Server } from "lucide-react";
+import { PlusCircle, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
@@ -8,6 +8,7 @@ import {
   useToggleMcpApp,
   useDeleteMcpServer,
   useImportMcpFromApps,
+  useUpsertMcpServer,
 } from "@/hooks/useMcp";
 import type { McpServer } from "@/types";
 import type { AppId } from "@/lib/api/types";
@@ -15,7 +16,7 @@ import McpFormModal from "./McpFormModal";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { Edit3, Trash2, ExternalLink } from "lucide-react";
 import { settingsApi } from "@/lib/api";
-import { mcpPresets } from "@/config/mcpPresets";
+import { getMcpPresetWithDescription, mcpPresets } from "@/config/mcpPresets";
 import { toast } from "sonner";
 import { MCP_APP_IDS } from "@/config/appConfig";
 import { AppCountBar } from "@/components/common/AppCountBar";
@@ -49,10 +50,16 @@ const UnifiedMcpPanel = React.forwardRef<
   const toggleAppMutation = useToggleMcpApp();
   const deleteServerMutation = useDeleteMcpServer();
   const importMutation = useImportMcpFromApps();
+  const upsertMutation = useUpsertMcpServer();
 
   const serverEntries = useMemo((): Array<[string, McpServer]> => {
     if (!serversMap) return [];
     return Object.entries(serversMap);
+  }, [serversMap]);
+
+  const missingPresets = useMemo(() => {
+    const existingIds = new Set(Object.keys(serversMap ?? {}));
+    return mcpPresets.filter((preset) => !existingIds.has(preset.id));
   }, [serversMap]);
 
   const enabledCounts = useMemo(() => {
@@ -112,6 +119,35 @@ const UnifiedMcpPanel = React.forwardRef<
     }
   };
 
+  const handleApplyPreset = async (presetId: string) => {
+    const preset = mcpPresets.find((item) => item.id === presetId);
+    if (!preset) return;
+
+    try {
+      const presetWithDesc = getMcpPresetWithDescription(preset, t);
+      await upsertMutation.mutateAsync({
+        ...presetWithDesc,
+        apps: {
+          claude: false,
+          codex: true,
+          gemini: false,
+          opencode: false,
+          openclaw: false,
+          hermes: false,
+        },
+      });
+      toast.success(
+        t("mcp.presets.applySuccess", {
+          name: presetWithDesc.name || presetWithDesc.id,
+          defaultValue: "MCP preset applied",
+        }),
+        { closeButton: true },
+      );
+    } catch (error) {
+      toast.error(t("common.error"), { description: String(error) });
+    }
+  };
+
   React.useImperativeHandle(ref, () => ({
     openAdd: handleAdd,
     openImport: handleImport,
@@ -146,6 +182,43 @@ const UnifiedMcpPanel = React.forwardRef<
         counts={enabledCounts}
         appIds={MCP_APP_IDS}
       />
+
+      {missingPresets.length > 0 && (
+        <div className="mb-3 rounded-xl border border-border-default bg-muted/30 p-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-foreground">
+                {t("mcp.presets.quickApplyTitle", {
+                  defaultValue: "Quick MCP presets",
+                })}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {t("mcp.presets.quickApplyDescription", {
+                  defaultValue:
+                    "Apply common MCP servers to Codex with one click. You can still edit or enable other apps later.",
+                })}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {missingPresets.map((preset) => (
+              <Button
+                key={preset.id}
+                type="button"
+                variant={preset.id === "GateWay-Mcp" ? "default" : "secondary"}
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                disabled={upsertMutation.isPending}
+                onClick={() => void handleApplyPreset(preset.id)}
+                title={t(`mcp.presets.${preset.id}.description`)}
+              >
+                <PlusCircle size={13} />
+                {preset.id}
+              </Button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
         {isLoading ? (

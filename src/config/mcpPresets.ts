@@ -30,6 +30,22 @@ const createNpxCommand = (
 // - description 字段使用国际化 key，在使用时通过 t() 函数获取翻译
 export const mcpPresets: McpPreset[] = [
   {
+    id: "GateWay-Mcp",
+    name: "GateWay-Mcp",
+    tags: ["stdio", "gateway", "router", "low-token"],
+    server: {
+      type: "stdio",
+      command: "/home/xiaofeng/Applications/Gateway-Mcp/.venv/bin/python",
+      args: [
+        "/home/xiaofeng/Applications/Gateway-Mcp/gateway_mcp_server.py",
+        "--config",
+        "/home/xiaofeng/Applications/Gateway-Mcp/mcps_config.json",
+      ],
+    } as McpServerSpec,
+    homepage: "https://github.com/LunFengChen/Gateway-Mcp",
+    docs: "https://github.com/LunFengChen/Gateway-Mcp#readme",
+  },
+  {
     id: "fetch",
     name: "mcp-server-fetch",
     tags: ["stdio", "http", "web"],
