@@ -68,6 +68,7 @@ import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { FailoverToggle } from "@/components/proxy/FailoverToggle";
+import { ForwardLogDock } from "@/components/proxy/ForwardLogDock";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel from "@/components/prompts/PromptPanel";
@@ -1531,6 +1532,17 @@ function App() {
         )}
         {renderContent()}
       </main>
+
+      {currentView === "providers" && (
+        <ForwardLogDock
+          activeApp={activeApp}
+          visible={true}
+          onOpenUsage={() => {
+            setSettingsDefaultTab("usage");
+            setCurrentView("settings");
+          }}
+        />
+      )}
 
       <AddProviderDialog
         open={isAddOpen}
