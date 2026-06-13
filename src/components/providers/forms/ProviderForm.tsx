@@ -9,6 +9,7 @@ import { Form, FormField, FormItem, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
+import { usageApi } from "@/lib/api/usage";
 import type {
   ProviderCategory,
   ProviderMeta,
@@ -209,6 +210,130 @@ const normalizeCodexChatReasoningForSave = (
     outputFormat: value?.outputFormat ?? "auto",
   };
 };
+
+const PROVIDER_FORM_USAGE_DAYS = 7;
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat(undefined, { notation: "compact" }).format(
+    value,
+  );
+}
+
+function formatUsageCost(value: string): string {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: parsed < 1 ? 4 : 2,
+  }).format(parsed);
+}
+
+function ProviderUsageSummary({
+  appId,
+  providerId,
+}: {
+  appId: AppId;
+  providerId?: string;
+}) {
+  const enabled = Boolean(providerId);
+  const range = useMemo(() => {
+    const endDate = Math.floor(Date.now() / 1000);
+    return {
+      endDate,
+      startDate: endDate - PROVIDER_FORM_USAGE_DAYS * 24 * 60 * 60,
+    };
+  }, []);
+
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: [
+      "provider-form-usage-summary",
+      appId,
+      providerId,
+      range.startDate,
+      range.endDate,
+    ],
+    enabled,
+    queryFn: async () => {
+      const rows = await usageApi.getProviderStats(
+        range.startDate,
+        range.endDate,
+        appId,
+      );
+      return rows.find((row) => row.providerId === providerId) ?? null;
+    },
+  });
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-muted/30 p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium">用量汇总</p>
+          <p className="text-xs text-muted-foreground">
+            本地代理统计 · 最近 {PROVIDER_FORM_USAGE_DAYS} 天
+          </p>
+        </div>
+        {enabled && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isLoading}
+            onClick={() => void refetch()}
+          >
+            {isLoading ? "刷新中..." : "刷新"}
+          </Button>
+        )}
+      </div>
+
+      {!enabled ? (
+        <p className="text-xs text-muted-foreground">
+          保存供应商后，这里会显示该渠道的请求数、Token、成本和成功率。
+        </p>
+      ) : isError ? (
+        <p className="text-xs text-destructive">用量统计加载失败。</p>
+      ) : isLoading ? (
+        <p className="text-xs text-muted-foreground">正在加载用量统计...</p>
+      ) : !data ? (
+        <p className="text-xs text-muted-foreground">
+          暂无本渠道的本地代理用量记录。
+        </p>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          <UsageSummaryItem
+            label="请求"
+            value={formatCompactNumber(data.requestCount)}
+          />
+          <UsageSummaryItem
+            label="Token"
+            value={formatCompactNumber(data.totalTokens)}
+          />
+          <UsageSummaryItem
+            label="成本"
+            value={formatUsageCost(data.totalCost)}
+          />
+          <UsageSummaryItem
+            label="成功率"
+            value={`${data.successRate.toFixed(1)}%`}
+          />
+          <UsageSummaryItem
+            label="平均延迟"
+            value={`${Math.round(data.avgLatencyMs)}ms`}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UsageSummaryItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-background/60 p-3">
+      <p className="text-[11px] text-muted-foreground">{label}</p>
+      <p className="mt-1 truncate text-sm font-semibold">{value}</p>
+    </div>
+  );
+}
 
 export interface ProviderFormProps {
   appId: AppId;
@@ -1945,6 +2070,8 @@ function ProviderFormFull({
               ) : undefined
             }
           />
+
+          <ProviderUsageSummary appId={appId} providerId={providerId} />
 
           {appId === "claude" && (
             <ClaudeFormFields

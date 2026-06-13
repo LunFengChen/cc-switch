@@ -6,6 +6,7 @@ import type {
   DraggableSyntheticListeners,
 } from "@dnd-kit/core";
 import type { Provider } from "@/types";
+import type { ProviderStats } from "@/types/usage";
 import type { AppId } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ProviderActions } from "@/components/providers/ProviderActions";
@@ -59,7 +60,9 @@ interface ProviderCardProps {
   failoverPriority?: number; // 故障转移优先级（1 = P1, 2 = P2, ...）
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
+  onSetFailoverPrimary?: () => void; // 将该供应商设为故障转移 P1
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
+  usageStats?: ProviderStats; // 今日代理用量汇总
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -132,6 +135,55 @@ const extractApiUrl = (provider: Provider, fallbackText: string) => {
   return fallbackText;
 };
 
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat(undefined, { notation: "compact" }).format(
+    value,
+  );
+}
+
+function formatCompactCost(value: string): string {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return value;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: parsed < 1 ? 4 : 2,
+  }).format(parsed);
+}
+
+function formatUsdPerMillion(cost: string, tokens: number): string {
+  const parsed = Number(cost);
+  if (!Number.isFinite(parsed) || tokens <= 0) return "--";
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2,
+  }).format((parsed / tokens) * 1_000_000);
+}
+
+function ProviderProxyUsagePill({ stats }: { stats?: ProviderStats }) {
+  const requestCount = stats?.requestCount ?? 0;
+  const totalTokens = stats?.totalTokens ?? 0;
+  const totalCost = stats?.totalCost ?? "0";
+  const avgPrice = formatUsdPerMillion(totalCost, totalTokens);
+
+  return (
+    <div
+      className="hidden items-center gap-1.5 rounded-md bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground sm:flex"
+      title="今日本地代理用量"
+    >
+      <span className="font-medium text-foreground/80">今日</span>
+      <span>{formatCompactNumber(requestCount)} req</span>
+      <span className="text-muted-foreground/50">·</span>
+      <span>{formatCompactNumber(totalTokens)} tok</span>
+      <span className="text-muted-foreground/50">·</span>
+      <span>{formatCompactCost(totalCost)}</span>
+      <span className="text-muted-foreground/50">·</span>
+      <span className="text-emerald-500">均 {avgPrice}/1M</span>
+    </div>
+  );
+}
+
 export function ProviderCard({
   provider,
   isCurrent,
@@ -158,7 +210,9 @@ export function ProviderCard({
   failoverPriority,
   isInFailoverQueue = false,
   onToggleFailover,
+  onSetFailoverPrimary,
   activeProviderId,
+  usageStats,
   // OpenClaw: default model
   isDefaultModel,
   onSetAsDefault,
@@ -471,6 +525,8 @@ export function ProviderCard({
         <div className="flex items-center ml-auto min-w-0 gap-3">
           <div className="ml-auto">
             <div className="flex items-center gap-1">
+              <ProviderProxyUsagePill stats={usageStats} />
+
               {isCopilot ? (
                 <CopilotQuotaFooter
                   meta={provider.meta}
@@ -577,8 +633,10 @@ export function ProviderCard({
                 onOpenTerminal ? () => onOpenTerminal(provider) : undefined
               }
               isAutoFailoverEnabled={isAutoFailoverEnabled}
+              failoverPriority={failoverPriority}
               isInFailoverQueue={isInFailoverQueue}
               onToggleFailover={onToggleFailover}
+              onSetFailoverPrimary={onSetFailoverPrimary}
               // OpenClaw: default model
               isDefaultModel={isDefaultModel}
               onSetAsDefault={onSetAsDefault}

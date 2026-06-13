@@ -262,7 +262,14 @@ export function UsageHero({
                         <span className="text-muted-foreground/30">•</span>
                       </>
                     )}
-                    {t("usage.realTotal", "真实消耗 Tokens")}
+                    <span
+                      title={t(
+                        "usage.realTotalHint",
+                        "新增输入 + 输出 + 缓存写入 + 缓存命中读取；这是总处理量，不等同于扣费 token。",
+                      )}
+                    >
+                      {t("usage.realTotal", "总处理 Tokens")}
+                    </span>
                   </div>
                   <div className="flex items-baseline gap-2">
                     <span
