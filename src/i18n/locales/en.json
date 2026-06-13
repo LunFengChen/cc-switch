@@ -1710,11 +1710,18 @@
     },
     "presets": {
       "title": "Select MCP Type",
+      "quickApplyTitle": "Quick MCP presets",
+      "quickApplyDescription": "Apply common MCP servers to Codex with one click. You can still edit or enable other apps later.",
+      "applySuccess": "Applied {{name}}",
       "enable": "Enable",
       "enabled": "Enabled",
       "installed": "Installed",
       "docs": "Docs",
       "requiresEnv": "Requires env",
+      "GateWay-Mcp": {
+        "name": "GateWay-Mcp",
+        "description": "Low-token MCP gateway that routes many upstream MCP servers through search/describe/call tools; ideal as the default Codex MCP."
+      },
       "fetch": {
         "name": "mcp-server-fetch",
         "description": "Universal HTTP request tool, supports GET/POST and other HTTP methods, suitable for quick API requests and web data scraping"

@@ -1710,11 +1710,19 @@
     },
     "presets": {
       "title": "选择 MCP 类型",
+      "quickApplyTitle": "快速应用 MCP 预设",
+      "quickApplyDescription": "一键添加常用 MCP 到 Codex，之后仍可编辑或启用到其他应用。",
+      "applySuccess": "已应用 {{name}}",
+
       "enable": "启用",
       "enabled": "已启用",
       "installed": "已安装",
       "docs": "文档",
       "requiresEnv": "需要环境变量",
+      "GateWay-Mcp": {
+        "name": "GateWay-Mcp",
+        "description": "低 token 二级 MCP 路由网关，把多个上游 MCP 聚合为 search/describe/call 少量工具，适合 Codex 默认配置。"
+      },
       "fetch": {
         "name": "mcp-server-fetch",
         "description": "通用 HTTP 请求工具，支持 GET/POST 等 HTTP 方法，适合快速请求接口/抓取网页数据"
