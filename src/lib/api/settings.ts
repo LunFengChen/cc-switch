@@ -259,6 +259,14 @@ export const settingsApi = {
     return await invoke("probe_tool_installations", { tools });
   },
 
+  async installCodexRtk(): Promise<CodexRtkInstallResult> {
+    return await invoke("install_codex_rtk");
+  },
+
+  async installRtkHook(): Promise<RtkHookInstallResult> {
+    return await invoke("install_rtk_hook");
+  },
+
   async getRectifierConfig(): Promise<RectifierConfig> {
     return await invoke("get_rectifier_config");
   },
@@ -283,6 +291,22 @@ export const settingsApi = {
     return await invoke("set_log_config", { config });
   },
 };
+
+export interface CodexRtkInstallResult {
+  codexDir: string;
+  agentsPath: string;
+  rtkPath: string;
+  agentsBackupPath: string | null;
+  rtkBackupPath: string | null;
+  rtkVersion: string | null;
+}
+
+export interface RtkHookInstallResult {
+  command: string;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}
 
 /** 单处工具安装的诊断信息（多处安装冲突检测）。字段对应后端 ToolInstallation。 */
 export interface ToolInstallation {

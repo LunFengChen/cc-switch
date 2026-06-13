@@ -4720,3 +4720,244 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRtkInstallResult {
+    pub codex_dir: String,
+    pub agents_path: String,
+    pub rtk_path: String,
+    pub agents_backup_path: Option<String>,
+    pub rtk_backup_path: Option<String>,
+    pub rtk_version: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RtkHookInstallResult {
+    pub command: String,
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[tauri::command]
+pub async fn install_codex_rtk() -> Result<CodexRtkInstallResult, String> {
+    tokio::task::spawn_blocking(install_codex_rtk_impl)
+        .await
+        .map_err(|e| format!("RTK install task join error: {e}"))?
+}
+
+#[tauri::command]
+pub async fn install_rtk_hook() -> Result<RtkHookInstallResult, String> {
+    tokio::task::spawn_blocking(install_rtk_hook_impl)
+        .await
+        .map_err(|e| format!("RTK hook install task join error: {e}"))?
+}
+
+fn install_rtk_hook_impl() -> Result<RtkHookInstallResult, String> {
+    let output = std::process::Command::new("rtk")
+        .args(["init", "-g", "--hook-only", "--auto-patch"])
+        .output()
+        .map_err(|e| format!("执行 rtk init -g --hook-only --auto-patch 失败: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let success = output.status.success();
+    let result = RtkHookInstallResult {
+        command: "rtk init -g --hook-only --auto-patch".to_string(),
+        success,
+        stdout,
+        stderr,
+    };
+
+    if success {
+        Ok(result)
+    } else {
+        Err(format!(
+            "{} 失败: {}",
+            result.command,
+            if result.stderr.is_empty() {
+                result.stdout.as_str()
+            } else {
+                result.stderr.as_str()
+            }
+        ))
+    }
+}
+
+fn install_codex_rtk_impl() -> Result<CodexRtkInstallResult, String> {
+    let codex_dir = crate::codex_config::get_codex_config_dir();
+    std::fs::create_dir_all(&codex_dir)
+        .map_err(|e| format!("创建 Codex 配置目录失败 {}: {e}", codex_dir.display()))?;
+
+    let agents_path = codex_dir.join("AGENTS.md");
+    let rtk_path = codex_dir.join("RTK.md");
+
+    let current_agents = if agents_path.exists() {
+        Some(
+            std::fs::read_to_string(&agents_path)
+                .map_err(|e| format!("读取 {} 失败: {e}", agents_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let desired_agents = upsert_managed_block(current_agents.as_deref(), CODEX_RTK_AGENTS_BLOCK);
+
+    let agents_backup_path = backup_if_different(&agents_path, &desired_agents)?;
+    let rtk_backup_path = backup_if_different(&rtk_path, CODEX_RTK_MD)?;
+
+    std::fs::write(&agents_path, desired_agents)
+        .map_err(|e| format!("写入 {} 失败: {e}", agents_path.display()))?;
+    std::fs::write(&rtk_path, CODEX_RTK_MD)
+        .map_err(|e| format!("写入 {} 失败: {e}", rtk_path.display()))?;
+
+    let rtk_version = std::process::Command::new("rtk")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.is_empty());
+
+    Ok(CodexRtkInstallResult {
+        codex_dir: codex_dir.to_string_lossy().to_string(),
+        agents_path: agents_path.to_string_lossy().to_string(),
+        rtk_path: rtk_path.to_string_lossy().to_string(),
+        agents_backup_path: agents_backup_path.map(|p| p.to_string_lossy().to_string()),
+        rtk_backup_path: rtk_backup_path.map(|p| p.to_string_lossy().to_string()),
+        rtk_version,
+    })
+}
+
+fn upsert_managed_block(current: Option<&str>, block: &str) -> String {
+    const START: &str = "<!-- cc-switch-rtk:start -->";
+    const END: &str = "<!-- cc-switch-rtk:end -->";
+
+    let managed = format!("{START}\n{block}\n{END}");
+    let Some(current) = current else {
+        return format!("# Global Codex instructions\n\n{managed}\n");
+    };
+
+    if let Some(start) = current.find(START) {
+        if let Some(end_rel) = current[start..].find(END) {
+            let end = start + end_rel + END.len();
+            let mut next = String::new();
+            next.push_str(current[..start].trim_end());
+            next.push_str("\n\n");
+            next.push_str(&managed);
+            let suffix = current[end..].trim_start();
+            if !suffix.is_empty() {
+                next.push_str("\n\n");
+                next.push_str(suffix);
+            }
+            if !next.ends_with('\n') {
+                next.push('\n');
+            }
+            return next;
+        }
+    }
+
+    let mut next = current.trim_end().to_string();
+    if !next.is_empty() {
+        next.push_str("\n\n");
+    }
+    next.push_str(&managed);
+    next.push('\n');
+    next
+}
+
+fn backup_if_different(path: &Path, desired: &str) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let current =
+        std::fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+    if current == desired {
+        return Ok(None);
+    }
+
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("codex-config");
+    let backup = path.with_file_name(format!("{file_name}.bak-ccswitch-rtk-{stamp}"));
+    std::fs::copy(path, &backup)
+        .map_err(|e| format!("备份 {} 到 {} 失败: {e}", path.display(), backup.display()))?;
+    Ok(Some(backup))
+}
+
+const CODEX_RTK_AGENTS_BLOCK: &str = r#"## RTK usage
+
+RTK is installed for Codex. Use RTK for token-heavy shell inspection in every project.
+
+### Core rule
+
+Use RTK on the real command, not on the shell wrapper.
+
+Good:
+
+```bash
+rtk git status --short
+rtk git diff --stat
+rtk grep -n "pattern" src
+rtk find . -name "*.md"
+rtk read README.md
+rtk gain
+rtk gain --history
+```
+
+Wrong pattern:
+
+```bash
+rtk bash -lc 'git status --short'
+rtk bash -lc 'rg -n "pattern" src | sed -n "1,20p"'
+rtk sh -c 'find . -name "*.md"'
+```
+
+Reason: `rtk bash -lc ...` makes RTK see only `bash`, so the useful inner command is recorded as fallback/proxy and usually has little or no token savings. RTK should see `git`, `grep`, `find`, `read`, `curl`, etc.
+
+### When bash is actually needed
+
+Bash is allowed for real multi-step scripts, heredocs, loops, shell setup, redirection, or complex pipelines. In that case, do not put `rtk` before `bash`; put `rtk` on expensive inner commands when possible:
+
+```bash
+bash -lc 'set -e; rtk git status --short; rtk grep -n "pattern" src | sed -n "1,20p"'
+```
+
+Prefer separate direct `rtk ...` calls for simple inspection.
+
+### Verification
+
+To check whether RTK is producing useful stats:
+
+```bash
+rtk gain --history
+```
+
+Useful entries look like `rtk grep`, `rtk git`, `rtk find`, or `rtk read`; bad entries look like `rtk fallback: bash -lc...` for simple commands.
+"#;
+
+const CODEX_RTK_MD: &str = r#"# RTK - Rust Token Killer (Codex CLI)
+
+RTK is installed for Codex.
+
+Use `~/.codex/AGENTS.md` as the authoritative global instruction. The key rule is:
+
+- use `rtk` on real commands like `rtk grep`, `rtk git`, `rtk find`, `rtk read`
+- do not use `rtk bash -lc ...` for simple commands
+
+Verification:
+
+```bash
+rtk --version
+rtk gain
+rtk gain --history
+```
+"#;
