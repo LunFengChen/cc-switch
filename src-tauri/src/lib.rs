@@ -1345,6 +1345,8 @@ pub fn run() {
             commands::get_tool_versions,
             commands::run_tool_lifecycle_action,
             commands::probe_tool_installations,
+            commands::install_codex_rtk,
+            commands::install_rtk_hook,
             // Provider terminal
             commands::open_provider_terminal,
             // Universal Provider management
