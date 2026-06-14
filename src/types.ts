@@ -250,6 +250,7 @@ export type ClaudeApiFormat =
 export type CodexApiFormat = "openai_responses" | "openai_chat";
 
 export interface CodexCatalogModel {
+  clientModel?: string;
   model: string;
   displayName?: string;
   contextWindow?: string | number;

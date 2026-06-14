@@ -85,6 +85,7 @@ type CodexCatalogRow = CodexCatalogModel & { rowId: string };
 function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   return {
     rowId: crypto.randomUUID(),
+    clientModel: seed?.clientModel ?? "",
     model: seed?.model ?? "",
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
@@ -94,13 +95,19 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
 // Compares rows (with rowId) to incoming models (without) by data fields only,
 // so both sync effects can use the same equality definition.
 function catalogRowsMatchModels(
-  rows: Array<Pick<CodexCatalogRow, "model" | "displayName" | "contextWindow">>,
+  rows: Array<
+    Pick<
+      CodexCatalogRow,
+      "clientModel" | "model" | "displayName" | "contextWindow"
+    >
+  >,
   models: CodexCatalogModel[],
 ): boolean {
   if (rows.length !== models.length) return false;
   return rows.every((row, i) => {
     const incoming = models[i];
     return (
+      (row.clientModel ?? "") === (incoming.clientModel ?? "") &&
       row.model === (incoming.model ?? "") &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
       String(row.contextWindow ?? "") === String(incoming.contextWindow ?? "")
@@ -520,7 +527,12 @@ export function CodexFormFields({
                 {catalogRows.length > 0 && (
                   <div className="space-y-2">
                     {/* 列头：md+ 显示 */}
-                    <div className="hidden grid-cols-[1fr_1fr_140px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                    <div className="hidden grid-cols-[1fr_1fr_1fr_140px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                      <span>
+                        {t("codexConfig.catalogColumnClientModel", {
+                          defaultValue: "Codex 侧模型",
+                        })}
+                      </span>
                       <span>
                         {t("codexConfig.catalogColumnDisplay", {
                           defaultValue: "菜单显示名",
@@ -542,8 +554,28 @@ export function CodexFormFields({
                     {catalogRows.map((row, index) => (
                       <div
                         key={row.rowId}
-                        className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_140px_36px]"
+                        className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_1fr_140px_36px]"
                       >
+                        <Input
+                          value={row.clientModel ?? ""}
+                          onChange={(event) =>
+                            handleUpdateCatalogRow(index, {
+                              clientModel: event.target.value,
+                            })
+                          }
+                          placeholder={t(
+                            "codexConfig.catalogClientModelPlaceholder",
+                            {
+                              defaultValue: "例如: gpt-5.5",
+                            },
+                          )}
+                          aria-label={t(
+                            "codexConfig.catalogColumnClientModel",
+                            {
+                              defaultValue: "Codex 侧模型",
+                            },
+                          )}
+                        />
                         <Input
                           value={row.displayName ?? ""}
                           onChange={(event) =>

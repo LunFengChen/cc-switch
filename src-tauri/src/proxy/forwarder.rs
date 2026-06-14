@@ -1468,6 +1468,9 @@ impl RequestForwarder {
                 adapter.transform_request(mapped_body, provider)?
             }
         } else {
+            if matches!(app_type, AppType::Codex) {
+                super::providers::apply_codex_upstream_model(provider, &mut mapped_body);
+            }
             mapped_body
         };
 

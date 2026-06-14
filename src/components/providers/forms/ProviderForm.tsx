@@ -157,6 +157,7 @@ export const normalizeCodexCatalogModelsForSave = (
     if (!model || seen.has(model)) continue;
     seen.add(model);
 
+    const clientModel = item.clientModel?.trim();
     const displayName = item.displayName?.trim();
     const rawContextWindow = String(item.contextWindow ?? "").replace(
       /[^\d]/g,
@@ -167,6 +168,7 @@ export const normalizeCodexCatalogModelsForSave = (
       : undefined;
 
     normalized.push({
+      ...(clientModel ? { clientModel } : {}),
       model,
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),

@@ -66,23 +66,34 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
         : [];
       setCodexCatalogModels(
         rawCatalogModels
-          .map((item: any) => ({
-            model: typeof item?.model === "string" ? item.model : "",
-            displayName:
-              typeof item?.displayName === "string"
-                ? item.displayName
-                : typeof item?.display_name === "string"
-                  ? item.display_name
-                  : "",
-            contextWindow:
-              typeof item?.contextWindow === "string" ||
-              typeof item?.contextWindow === "number"
-                ? item.contextWindow
-                : typeof item?.context_window === "string" ||
-                    typeof item?.context_window === "number"
-                  ? item.context_window
-                  : "",
-          }))
+          .map((item: any, index: number) => {
+            const clientModel =
+              typeof item?.clientModel === "string"
+                ? item.clientModel
+                : typeof item?.client_model === "string"
+                  ? item.client_model
+                  : index === 0
+                    ? "gpt-5.5"
+                    : "";
+            return {
+              clientModel,
+              model: typeof item?.model === "string" ? item.model : "",
+              displayName:
+                typeof item?.displayName === "string"
+                  ? item.displayName
+                  : typeof item?.display_name === "string"
+                    ? item.display_name
+                    : "",
+              contextWindow:
+                typeof item?.contextWindow === "string" ||
+                typeof item?.contextWindow === "number"
+                  ? item.contextWindow
+                  : typeof item?.context_window === "string" ||
+                      typeof item?.context_window === "number"
+                    ? item.context_window
+                    : "",
+            };
+          })
           .filter((item: CodexCatalogModel) => item.model.trim()),
       );
 

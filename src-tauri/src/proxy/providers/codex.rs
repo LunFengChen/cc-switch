@@ -10,7 +10,7 @@ use crate::provider::{CodexChatReasoningConfig, Provider};
 use crate::proxy::error::ProxyError;
 use regex::Regex;
 use serde_json::Value as JsonValue;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
@@ -21,6 +21,12 @@ static CODEX_CLIENT_REGEX: LazyLock<Regex> =
 
 /// Codex 适配器
 pub struct CodexAdapter;
+
+/// Stable model ID exposed to Codex while CC Switch owns the local proxy route.
+///
+/// The real upstream model remains provider-scoped in the DB config; proxy
+/// forwarding rewrites this client-facing alias to the active provider model.
+pub const CODEX_PROXY_CLIENT_MODEL_ALIAS: &str = "gpt-5.5";
 
 /// Whether this Codex provider's real upstream should be called through
 /// OpenAI Chat Completions, even if the local Codex client is talking to CC
@@ -120,6 +126,78 @@ fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+fn codex_provider_client_model_map(provider: &Provider) -> HashMap<String, String> {
+    let Some(models) = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(|models| models.as_array())
+    else {
+        return HashMap::new();
+    };
+
+    let mut mappings = HashMap::new();
+    for (index, model_config) in models.iter().enumerate() {
+        let Some(upstream_model) = model_config
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        else {
+            continue;
+        };
+
+        let client_model = model_config
+            .get("clientModel")
+            .or_else(|| model_config.get("client_model"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .or_else(|| (index == 0).then_some(CODEX_PROXY_CLIENT_MODEL_ALIAS));
+
+        if let Some(client_model) = client_model {
+            mappings
+                .entry(client_model.to_string())
+                .or_insert_with(|| upstream_model.to_string());
+        }
+    }
+
+    mappings
+}
+
+/// Ensure a Codex request uses a model that belongs to the target provider.
+///
+/// A long-running Codex terminal keeps sending the model selected when the
+/// process started. During proxy failover that model may belong to the old
+/// provider (for example `deepseek-v4-flash`) while the next provider expects
+/// its own default model. If the target provider declares a catalog we preserve
+/// any model in that catalog; otherwise we fall back to the provider's configured
+/// upstream model. This keeps failover provider-scoped instead of leaking a
+/// previous provider's model ID into the new upstream.
+pub fn apply_codex_upstream_model(provider: &Provider, body: &mut JsonValue) -> Option<String> {
+    if let Some(request_model) = body
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        let client_model_map = codex_provider_client_model_map(provider);
+        if let Some(upstream_model) = client_model_map.get(request_model) {
+            body["model"] = JsonValue::String(upstream_model.clone());
+            return Some(upstream_model.clone());
+        }
+
+        let catalog_model_ids = codex_provider_catalog_model_ids(provider);
+        if catalog_model_ids.contains(request_model) {
+            return Some(request_model.to_string());
+        }
+    }
+
+    let upstream_model = codex_provider_upstream_model(provider)?;
+    body["model"] = JsonValue::String(upstream_model.clone());
+    Some(upstream_model)
+}
+
 /// For Codex Chat providers, ensure the request uses the configured upstream
 /// model before converting the request to Chat Completions.
 pub fn apply_codex_chat_upstream_model(
@@ -130,21 +208,7 @@ pub fn apply_codex_chat_upstream_model(
         return None;
     }
 
-    let catalog_model_ids = codex_provider_catalog_model_ids(provider);
-    if let Some(request_model) = body
-        .get("model")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    {
-        if catalog_model_ids.contains(request_model) {
-            return Some(request_model.to_string());
-        }
-    }
-
-    let upstream_model = codex_provider_upstream_model(provider)?;
-    body["model"] = JsonValue::String(upstream_model.clone());
-    Some(upstream_model)
+    apply_codex_upstream_model(provider, body)
 }
 
 pub fn resolve_codex_chat_reasoning_config(
@@ -850,6 +914,139 @@ wire_api = "responses"
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_rewrites_stale_failover_model() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "custom"
+model = "next-provider-default-model"
+
+[model_providers.custom]
+name = "Next Provider"
+base_url = "https://next-provider.example/v1"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "next-provider-default-model" }
+                ]
+            }
+        }));
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(
+            upstream_model.as_deref(),
+            Some("next-provider-default-model")
+        );
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("next-provider-default-model")
+        );
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_rewrites_proxy_client_alias() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek-v4-pro" }
+                ]
+            }
+        }));
+        let mut body = json!({
+            "model": CODEX_PROXY_CLIENT_MODEL_ALIAS,
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_uses_explicit_client_model_mapping() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "clientModel": "gpt-5.5", "model": "deepseek-v4-pro" },
+                    { "clientModel": "gpt-5.5-mini", "model": "deepseek-v4-flash" }
+                ]
+            }
+        }));
+        let mut body = json!({
+            "model": "gpt-5.5-mini",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_preserves_target_catalog_model() {
+        let provider = create_provider(json!({
+            "config": r#"
+model_provider = "custom"
+model = "next-provider-default-model"
+
+[model_providers.custom]
+name = "Next Provider"
+base_url = "https://next-provider.example/v1"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    { "model": "next-provider-default-model" },
+                    { "model": "next-provider-alt-model" }
+                ]
+            }
+        }));
+        let mut body = json!({
+            "model": "next-provider-alt-model",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("next-provider-alt-model"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("next-provider-alt-model")
+        );
     }
 
     #[test]
