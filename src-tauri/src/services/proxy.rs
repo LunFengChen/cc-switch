@@ -2294,15 +2294,81 @@ impl ProxyService {
             crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
                 .unwrap_or(updated);
 
-        if let Some(upstream_model) =
-            provider.and_then(crate::proxy::providers::codex_provider_upstream_model)
+        if provider
+            .and_then(crate::proxy::providers::codex_provider_upstream_model)
+            .is_some()
         {
-            updated =
-                crate::codex_config::update_codex_toml_field(&updated, "model", &upstream_model)
-                    .unwrap_or(updated);
+            updated = crate::codex_config::update_codex_toml_field(
+                &updated,
+                "model",
+                crate::proxy::providers::CODEX_PROXY_CLIENT_MODEL_ALIAS,
+            )
+            .unwrap_or(updated);
         }
 
         updated
+    }
+
+    fn codex_proxy_client_model_catalog_from_provider(provider: &Provider) -> Option<Value> {
+        crate::proxy::providers::codex_provider_upstream_model(provider)?;
+
+        let mut entries = Vec::new();
+        if let Some(models) = provider
+            .settings_config
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .and_then(|models| models.as_array())
+        {
+            let mut seen = std::collections::HashSet::new();
+            for (index, model) in models.iter().enumerate() {
+                let client_model = model
+                    .get("clientModel")
+                    .or_else(|| model.get("client_model"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        (index == 0)
+                            .then_some(crate::proxy::providers::CODEX_PROXY_CLIENT_MODEL_ALIAS)
+                    });
+                let Some(client_model) = client_model else {
+                    continue;
+                };
+                if !seen.insert(client_model.to_string()) {
+                    continue;
+                }
+
+                let display_name = model
+                    .get("displayName")
+                    .or_else(|| model.get("display_name"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(client_model);
+
+                let mut alias_model = json!({
+                    "model": client_model,
+                    "displayName": display_name,
+                });
+                if let Some(context_window) = model
+                    .get("contextWindow")
+                    .or_else(|| model.get("context_window"))
+                    .cloned()
+                {
+                    alias_model["contextWindow"] = context_window;
+                }
+                entries.push(alias_model);
+            }
+        }
+
+        if entries.is_empty() {
+            entries.push(json!({
+                "model": crate::proxy::providers::CODEX_PROXY_CLIENT_MODEL_ALIAS,
+                "displayName": "GPT-5.5 (CC Switch)",
+            }));
+        }
+
+        Some(json!({ "models": entries }))
     }
 
     fn attach_codex_model_catalog_from_provider(
@@ -2313,11 +2379,14 @@ impl ProxyService {
             return;
         };
 
-        let model_catalog = provider
-            .settings_config
-            .get("modelCatalog")
-            .cloned()
-            .unwrap_or_else(|| json!({ "models": [] }));
+        let model_catalog = Self::codex_proxy_client_model_catalog_from_provider(provider)
+            .unwrap_or_else(|| {
+                provider
+                    .settings_config
+                    .get("modelCatalog")
+                    .cloned()
+                    .unwrap_or_else(|| json!({ "models": [] }))
+            });
 
         if let Some(root) = live_config.as_object_mut() {
             root.insert("modelCatalog".to_string(), model_catalog);
@@ -4180,7 +4249,7 @@ wire_api = "chat"
     }
 
     #[test]
-    fn apply_codex_proxy_toml_config_keeps_upstream_model_for_chat_provider() {
+    fn apply_codex_proxy_toml_config_uses_stable_alias_for_chat_provider() {
         let input = r#"
 model_provider = "deepseek"
 model = "deepseek-v4-flash"
@@ -4214,7 +4283,7 @@ wire_api = "responses"
 
         assert_eq!(
             parsed.get("model").and_then(|v| v.as_str()),
-            Some("deepseek-v4-flash")
+            Some(crate::proxy::providers::CODEX_PROXY_CLIENT_MODEL_ALIAS)
         );
         assert_eq!(
             parsed
@@ -4227,7 +4296,7 @@ wire_api = "responses"
     }
 
     #[test]
-    fn apply_codex_proxy_toml_config_preserves_model_for_responses_provider() {
+    fn apply_codex_proxy_toml_config_uses_stable_alias_for_responses_provider() {
         let input = r#"
 model_provider = "responses"
 model = "upstream-responses-model"
@@ -4260,12 +4329,12 @@ wire_api = "responses"
 
         assert_eq!(
             parsed.get("model").and_then(|v| v.as_str()),
-            Some("upstream-responses-model")
+            Some(crate::proxy::providers::CODEX_PROXY_CLIENT_MODEL_ALIAS)
         );
     }
 
     #[test]
-    fn apply_codex_proxy_toml_config_restores_upstream_model_for_responses_provider() {
+    fn apply_codex_proxy_toml_config_restores_stable_alias_for_responses_provider() {
         let input = r#"
 model_provider = "responses"
 model = "gpt-5.4"
@@ -4305,7 +4374,73 @@ wire_api = "responses"
 
         assert_eq!(
             parsed.get("model").and_then(|v| v.as_str()),
-            Some("upstream-responses-model")
+            Some(crate::proxy::providers::CODEX_PROXY_CLIENT_MODEL_ALIAS)
+        );
+    }
+
+    #[test]
+    fn codex_proxy_client_model_catalog_exposes_alias_not_upstream_model() {
+        let provider = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "config": r#"model_provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+"#,
+                "modelCatalog": {
+                    "models": [
+                        {
+                            "clientModel": "gpt-5.5",
+                            "model": "deepseek-v4-pro",
+                            "displayName": "DeepSeek V4 Pro",
+                            "contextWindow": 1000000
+                        },
+                        {
+                            "clientModel": "gpt-5.5-mini",
+                            "model": "deepseek-v4-flash",
+                            "displayName": "DeepSeek V4 Flash",
+                            "contextWindow": 1000000
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+
+        let catalog = ProxyService::codex_proxy_client_model_catalog_from_provider(&provider)
+            .expect("provider has upstream model");
+        let first = catalog
+            .get("models")
+            .and_then(|models| models.as_array())
+            .and_then(|models| models.first())
+            .expect("alias catalog entry");
+
+        assert_eq!(first.get("model").and_then(|v| v.as_str()), Some("gpt-5.5"));
+        assert_eq!(
+            first.get("displayName").and_then(|v| v.as_str()),
+            Some("DeepSeek V4 Pro")
+        );
+        assert_eq!(
+            first.get("contextWindow").and_then(|v| v.as_u64()),
+            Some(1_000_000)
+        );
+        let second = catalog
+            .get("models")
+            .and_then(|models| models.as_array())
+            .and_then(|models| models.get(1))
+            .expect("second alias catalog entry");
+        assert_eq!(
+            second.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.5-mini")
+        );
+        assert_eq!(
+            second.get("displayName").and_then(|v| v.as_str()),
+            Some("DeepSeek V4 Flash")
         );
     }
 
